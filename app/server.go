@@ -4,12 +4,16 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 )
 
+type Headers map[string]string
+
 type Response struct {
 	status, body string
-	headers      []string
+	headers      Headers
 }
 
 type HTTPInfo struct {
@@ -18,29 +22,31 @@ type HTTPInfo struct {
 
 type Request struct {
 	info    HTTPInfo
-	headers map[string]string
+	headers Headers
 	body    string
 }
 
-func parseResp(resp Response) (parsedResponse string) {
-	parsedResponse += resp.status + "\r\n"
-	for _, header := range resp.headers {
-		parsedResponse += header + "\r\n"
-	}
-	parsedResponse += "\r\n" + resp.body + "\r\n"
+const CRLF = "\r\n"
 
+func parseResp(resp Response) (parsedResponse string) {
+	parsedResponse += resp.status + CRLF
+	for k, v := range resp.headers {
+		parsedResponse += k + ": " + v + CRLF
+	}
+	parsedResponse += CRLF + resp.body + CRLF
+	fmt.Println(parsedResponse)
 	return
 }
 
 func parseReq(req string) Request {
-	separatedReq := strings.Split(req, "\r\n")
+	separatedReq := strings.Split(req, CRLF)
 	info := strings.Split(separatedReq[0], " ")
 	headers := make(map[string]string)
 	var body string
 
 	for i, v := range separatedReq[1:] {
 		if v == "" {
-			body = strings.Join(separatedReq[i:], "\r\n")
+			body = strings.Join(separatedReq[i:], CRLF)
 			break
 		}
 
@@ -48,6 +54,13 @@ func parseReq(req string) Request {
 	}
 
 	return Request{info: HTTPInfo{method: info[0], rout: info[1], protocol: info[2]}, headers: headers, body: body}
+}
+
+func parseHeadersToString(headers Headers) (res string) {
+	for k, v := range headers {
+		res += k + "" + v
+	}
+	return
 }
 
 func writeToConn(conn net.Conn, resp string) (err error) {
@@ -73,39 +86,97 @@ func handleClient(conn net.Conn) {
 				fmt.Println("Writing to resp: ", err.Error())
 				return
 			}
+			return
 		} else if route == "/user-agent" {
 			if userAgent, ok := req.headers["User-Agent"]; ok {
 				body := userAgent
 				resp := Response{
 					status:  "HTTP/1.1 200 Ok",
-					headers: []string{"Content-Type: text/plain", fmt.Sprintf("Content-Length: %v", len([]rune(body)))},
+					headers: Headers{"Content-Type": "text/plain", "Content-Length": strconv.Itoa(len([]rune(body)))},
 					body:    body,
 				}
 				if err := writeToConn(conn, parseResp(resp)); err != nil {
 					fmt.Println("Writing to resp: ", err.Error())
 					return
 				}
+				return
 			}
 
 			if err := writeToConn(conn, parseResp(Response{status: "HTTP/1.1 400 Not Found"})); err != nil {
 				fmt.Println("Writing to resp: ", err.Error())
 				return
 			}
+			return
 		} else if segments := strings.Split(route, "/"); segments[1] == "echo" {
 			body := strings.Join(segments[2:], "")
 			resp := Response{
 				status:  "HTTP/1.1 200 Ok",
-				headers: []string{"Content-Type: text/plain", fmt.Sprintf("Content-Length: %v", len([]rune(body)))},
+				headers: Headers{"Content-Type": "text/plain", "Content-Length": strconv.Itoa(len([]rune(body)))},
 				body:    body,
 			}
 			if err := writeToConn(conn, parseResp(resp)); err != nil {
 				fmt.Println("Writing to resp: ", err.Error())
 				return
 			}
-		}
+			return
+		} else if segments := strings.Split(route, "/"); segments[1] == "files" {
+			fileName := strings.TrimPrefix(route, "/files/")
+			filePath := filepath.Join("./", os.Args[2], fileName)
 
-		if err := writeToConn(conn, parseResp(Response{status: "HTTP/1.1 400 Not Found"})); err != nil {
-			fmt.Println("Writing to resp: ", err.Error())
+			file, err := os.Open(filePath)
+			if err != nil {
+				writeToConn(conn, "HTTP/1.1 404 Not Found\r\n\r\n")
+				return
+			}
+			defer file.Close()
+
+			buffer := make([]byte, 1024)
+			file.Read(buffer)
+
+			resp := Response{status: "HTTP/1.1 200 Ok", headers: Headers{"Content-Type": "application/octet-stream"}, body: string(buffer)}
+			if err := writeToConn(conn, parseResp(resp)); err != nil {
+				fmt.Println("Writing to resp: ", err.Error())
+				return
+			}
+			return
+		} else {
+			if err := writeToConn(conn, parseResp(Response{status: "HTTP/1.1 400 Not Found"})); err != nil {
+				fmt.Println("Writing to resp: ", err.Error())
+				return
+			}
+		}
+	} else if req.info.method == "POST" {
+		if segments := strings.Split(req.info.rout, "/"); segments[1] == "files" {
+			fileName := strings.TrimPrefix(req.info.rout, "/files/")
+			dirPath := filepath.Join("./", os.Args[2])
+			filePath := filepath.Join(dirPath, fileName)
+
+			if err := os.Mkdir(dirPath, 0777); err != nil {
+				fmt.Println(err.Error())
+				writeToConn(conn, "HTTP/1.1 404 Not Found\r\n\r\n")
+				return
+			}
+
+			file, err := os.Create(filePath)
+			if err != nil {
+				fmt.Println(err.Error())
+				writeToConn(conn, "HTTP/1.1 404 Not Found\r\n\r\n")
+				return
+			}
+			defer file.Close()
+
+			_, err = file.Write([]byte(req.body))
+			if err != nil {
+				fmt.Println(2)
+				writeToConn(conn, "HTTP/1.1 404 Not Found\r\n\r\n")
+				return
+			}
+
+			resp := Response{status: "HTTP/1.1 200 Ok"}
+			if err := writeToConn(conn, parseResp(resp)); err != nil {
+				fmt.Println("Writing to resp: ", err.Error())
+				return
+			}
 			return
 		}
 	}
